@@ -422,6 +422,111 @@ def analyze_crm(
     result["Flag_Summary"] = summaries
 
     # --------------------------------------------------------
+    # FH / SH CLASSIFICATION
+    # --------------------------------------------------------
+    # FH = before 2:00 PM
+    # SH = 2:00 PM onwards
+    # This uses Lead Date + Lead Time already parsed above.
+    result["_LeadDateTime"] = lead_dt
+    result["Session"] = result["_LeadDateTime"].apply(
+        lambda x: (
+            "FH" if pd.notna(x) and x.hour < 14
+            else "SH" if pd.notna(x)
+            else ""
+        )
+    )
+
+    # --------------------------------------------------------
+    # FH / SH EMPLOYEE ERROR SUMMARY
+    # --------------------------------------------------------
+    # Fake GPS = Technical Error
+    # Every other abnormality = CM Error.
+    # If a visit has both Fake GPS and another flag, it contributes
+    # to both Technical Error and CM Error.
+    def build_session_error_summary(session):
+        session_df = result[result["Session"] == session].copy()
+
+        if session_df.empty:
+            return pd.DataFrame(
+                columns=[
+                    "EmployeeName",
+                    "Total Visits",
+                    "Total Flags",
+                    "Technical Error",
+                    "CM Error",
+                    "Remarks",
+                ]
+            )
+
+        rows = []
+
+        for employee, group in session_df.groupby(
+            "EmployeeName",
+            dropna=False
+        ):
+            total_visits = len(group)
+            total_flags = int(group["Total_Flags"].sum())
+
+            technical_error = 0
+            cm_error = 0
+            remarks = []
+
+            for _, visit in group.iterrows():
+                flag_text = str(visit.get("Flag_Summary", "") or "")
+                if not flag_text:
+                    continue
+
+                flags = [
+                    f.strip()
+                    for f in flag_text.split(";")
+                    if f.strip()
+                ]
+
+                has_fake_gps = any(
+                    "Fake GPS" in f
+                    for f in flags
+                )
+
+                other_flags = [
+                    f for f in flags
+                    if "Fake GPS" not in f
+                ]
+
+                if has_fake_gps:
+                    technical_error += 1
+
+                if other_flags:
+                    cm_error += len(other_flags)
+
+                for flag in flags:
+                    if flag not in remarks:
+                        remarks.append(flag)
+
+            rows.append(
+                {
+                    "EmployeeName": employee,
+                    "Total Visits": total_visits,
+                    "Total Flags": total_flags,
+                    "Technical Error": technical_error,
+                    "CM Error": cm_error,
+                    "Remarks": " / ".join(remarks),
+                }
+            )
+
+        return (
+            pd.DataFrame(rows)
+            .sort_values(
+                ["Total Flags", "EmployeeName"],
+                ascending=[False, True],
+                na_position="last",
+            )
+            .reset_index(drop=True)
+        )
+
+    fh_error_summary = build_session_error_summary("FH")
+    sh_error_summary = build_session_error_summary("SH")
+
+    # --------------------------------------------------------
     # ABNORMALITY SUMMARY
     # --------------------------------------------------------
 
@@ -525,7 +630,9 @@ def analyze_crm(
     return (
         result,
         summary,
-        employee_summary
+        employee_summary,
+        fh_error_summary,
+        sh_error_summary
     )
 
 
@@ -537,6 +644,8 @@ def create_excel(
     result,
     summary,
     employee_summary,
+    fh_error_summary,
+    sh_error_summary,
     from_date,
     to_date
 ):
@@ -620,7 +729,24 @@ def create_excel(
             index=False
         )
 
-        result.to_excel(
+        fh_error_summary.to_excel(
+            writer,
+            sheet_name="FH Error Summary",
+            index=False
+        )
+
+        sh_error_summary.to_excel(
+            writer,
+            sheet_name="SH Error Summary",
+            index=False
+        )
+
+        result_for_excel = result.drop(
+            columns=["_LeadDateTime", "Session"],
+            errors="ignore"
+        )
+
+        result_for_excel.to_excel(
             writer,
             sheet_name="Flagged CRM Data",
             index=False
@@ -821,6 +947,95 @@ def create_excel(
         ws.auto_filter.ref = (
             ws.dimensions
         )
+
+        # ----------------------------------------------------
+        # FH / SH ERROR SUMMARY FORMATTING
+        # ----------------------------------------------------
+        for sheet_name in [
+            "FH Error Summary",
+            "SH Error Summary",
+        ]:
+            summary_ws = writer.book[sheet_name]
+
+            for cell in summary_ws[1]:
+                cell.fill = header_fill
+                cell.font = Font(
+                    color="FFFFFF",
+                    bold=True
+                )
+                cell.alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                    wrap_text=True
+                )
+
+            # Center numeric columns and wrap remarks.
+            header_map_session = {
+                str(cell.value).strip(): cell.column
+                for cell in summary_ws[1]
+            }
+
+            for column_name in [
+                "Total Visits",
+                "Total Flags",
+                "Technical Error",
+                "CM Error",
+            ]:
+                col_num = header_map_session.get(column_name)
+
+                if col_num:
+                    for row_num in range(
+                        2,
+                        summary_ws.max_row + 1
+                    ):
+                        summary_ws.cell(
+                            row_num,
+                            col_num
+                        ).alignment = Alignment(
+                            horizontal="center",
+                            vertical="center"
+                        )
+
+            remarks_col = header_map_session.get("Remarks")
+
+            if remarks_col:
+                for row_num in range(
+                    2,
+                    summary_ws.max_row + 1
+                ):
+                    summary_ws.cell(
+                        row_num,
+                        remarks_col
+                    ).alignment = Alignment(
+                        vertical="top",
+                        wrap_text=True
+                    )
+
+            summary_ws.freeze_panes = "A2"
+            summary_ws.auto_filter.ref = summary_ws.dimensions
+
+            # Reasonable column widths.
+            widths = {
+                "EmployeeName": 25,
+                "Total Visits": 14,
+                "Total Flags": 13,
+                "Technical Error": 17,
+                "CM Error": 12,
+                "Remarks": 55,
+            }
+
+            for header, width in widths.items():
+                col_num = header_map_session.get(header)
+                if col_num:
+                    summary_ws.column_dimensions[
+                        summary_ws.cell(1, col_num).column_letter
+                    ].width = width
+
+    # Remove helper columns from the downloadable detailed data.
+    result = result.drop(
+        columns=["_LeadDateTime", "Session"],
+        errors="ignore"
+    )
 
     output.seek(0)
 
@@ -1094,11 +1309,15 @@ st.success(
 
 try:
 
-    result, summary, employee_summary = (
-        analyze_crm(
-            df_daily,
-            quick_minutes=quick_minutes
-        )
+    (
+        result,
+        summary,
+        employee_summary,
+        fh_error_summary,
+        sh_error_summary,
+    ) = analyze_crm(
+        df_daily,
+        quick_minutes=quick_minutes
     )
 
 except Exception as exc:
@@ -1255,6 +1474,30 @@ st.dataframe(
 
 
 # ============================================================
+# FH ERROR SUMMARY
+# ============================================================
+
+st.subheader("🌅 FH Error Summary")
+
+st.dataframe(
+    fh_error_summary,
+    use_container_width=True,
+    hide_index=True
+)
+
+# ============================================================
+# SH ERROR SUMMARY
+# ============================================================
+
+st.subheader("🌙 SH Error Summary")
+
+st.dataframe(
+    sh_error_summary,
+    use_container_width=True,
+    hide_index=True
+)
+
+# ============================================================
 # CREATE EXCEL
 # ============================================================
 
@@ -1262,6 +1505,8 @@ excel_bytes = create_excel(
     result,
     summary,
     employee_summary,
+    fh_error_summary,
+    sh_error_summary,
     from_date,
     to_date
 )
@@ -1303,5 +1548,8 @@ st.caption(
     "Flagged records contain Total_Flags "
     "and Flag_Summary. Quick visits are "
     "checked separately for each employee "
-    "and each Lead Date."
+    "and each Lead Date. FH is before 2:00 PM and "
+    "SH is 2:00 PM onwards. Fake GPS is classified "
+    "as Technical Error; all other abnormalities are "
+    "classified as CM Error."
 )
