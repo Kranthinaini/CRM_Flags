@@ -443,6 +443,8 @@ def analyze_crm(
     # Every other abnormality = CM Error.
     # If a visit has both Fake GPS and another flag, it contributes
     # to both Technical Error and CM Error.
+    # Only employees with at least one error (Total Flags > 0) are
+    # included in this summary.
     def build_session_error_summary(session):
         session_df = result[result["Session"] == session].copy()
 
@@ -466,6 +468,10 @@ def analyze_crm(
         ):
             total_visits = len(group)
             total_flags = int(group["Total_Flags"].sum())
+
+            # Skip employees with no errors at all in this session.
+            if total_flags == 0:
+                continue
 
             technical_error = 0
             cm_error = 0
@@ -511,6 +517,18 @@ def analyze_crm(
                     "CM Error": cm_error,
                     "Remarks": " / ".join(remarks),
                 }
+            )
+
+        if not rows:
+            return pd.DataFrame(
+                columns=[
+                    "EmployeeName",
+                    "Total Visits",
+                    "Total Flags",
+                    "Technical Error",
+                    "CM Error",
+                    "Remarks",
+                ]
             )
 
         return (
@@ -729,16 +747,38 @@ def create_excel(
             index=False
         )
 
+        # ----------------------------------------------------
+        # FH & SH ERROR SUMMARY - SINGLE SHEET, TWO TABLES
+        # ----------------------------------------------------
+        # FH table starts at row 1 (header at row 1).
+        # SH table starts a couple of rows below the end of
+        # the FH table, each with its own title + header row.
+
+        fh_title_row = 0  # 0-indexed row for "FH Error Summary" title
+        fh_header_row = 1  # header row for FH table
+        fh_data_start = 2  # first data row for FH table
+
+        # startrow is 0-indexed for to_excel; title goes one row above header
         fh_error_summary.to_excel(
             writer,
-            sheet_name="FH Error Summary",
-            index=False
+            sheet_name="FH & SH Error Summary",
+            index=False,
+            startrow=fh_header_row,
         )
+
+        sh_title_row = (
+            fh_header_row
+            + 1
+            + len(fh_error_summary)
+            + 2
+        )
+        sh_header_row = sh_title_row + 1
 
         sh_error_summary.to_excel(
             writer,
-            sheet_name="SH Error Summary",
-            index=False
+            sheet_name="FH & SH Error Summary",
+            index=False,
+            startrow=sh_header_row,
         )
 
         result_for_excel = result.drop(
@@ -949,31 +989,50 @@ def create_excel(
         )
 
         # ----------------------------------------------------
-        # FH / SH ERROR SUMMARY FORMATTING
+        # FH & SH ERROR SUMMARY FORMATTING (single sheet,
+        # two stacked tables with their own titles)
         # ----------------------------------------------------
-        for sheet_name in [
-            "FH Error Summary",
-            "SH Error Summary",
-        ]:
-            summary_ws = writer.book[sheet_name]
 
-            for cell in summary_ws[1]:
+        combo_ws = writer.book["FH & SH Error Summary"]
+
+        widths = {
+            "EmployeeName": 25,
+            "Total Visits": 14,
+            "Total Flags": 13,
+            "Technical Error": 17,
+            "CM Error": 12,
+            "Remarks": 55,
+        }
+
+        def format_error_table(title_row_0idx, header_row_0idx, n_rows, title_text):
+            title_row = title_row_0idx + 1  # 1-indexed for openpyxl
+            header_row = header_row_0idx + 1
+
+            # Title cell
+            title_cell = combo_ws.cell(title_row, 1, title_text)
+            title_cell.font = Font(bold=True, size=13, color="1F4E78")
+
+            # Header row styling
+            header_cells = combo_ws[header_row]
+            header_map_local = {}
+
+            for cell in header_cells:
+
+                if cell.value is None:
+                    continue
+
+                header_map_local[str(cell.value).strip()] = cell.column
+
                 cell.fill = header_fill
-                cell.font = Font(
-                    color="FFFFFF",
-                    bold=True
-                )
+                cell.font = Font(color="FFFFFF", bold=True)
                 cell.alignment = Alignment(
                     horizontal="center",
                     vertical="center",
                     wrap_text=True
                 )
 
-            # Center numeric columns and wrap remarks.
-            header_map_session = {
-                str(cell.value).strip(): cell.column
-                for cell in summary_ws[1]
-            }
+            data_start = header_row + 1
+            data_end = header_row + n_rows
 
             for column_name in [
                 "Total Visits",
@@ -981,55 +1040,44 @@ def create_excel(
                 "Technical Error",
                 "CM Error",
             ]:
-                col_num = header_map_session.get(column_name)
+                col_num = header_map_local.get(column_name)
 
                 if col_num:
-                    for row_num in range(
-                        2,
-                        summary_ws.max_row + 1
-                    ):
-                        summary_ws.cell(
-                            row_num,
-                            col_num
-                        ).alignment = Alignment(
+                    for row_num in range(data_start, data_end + 1):
+                        combo_ws.cell(row_num, col_num).alignment = Alignment(
                             horizontal="center",
                             vertical="center"
                         )
 
-            remarks_col = header_map_session.get("Remarks")
+            remarks_col = header_map_local.get("Remarks")
 
             if remarks_col:
-                for row_num in range(
-                    2,
-                    summary_ws.max_row + 1
-                ):
-                    summary_ws.cell(
-                        row_num,
-                        remarks_col
-                    ).alignment = Alignment(
+                for row_num in range(data_start, data_end + 1):
+                    combo_ws.cell(row_num, remarks_col).alignment = Alignment(
                         vertical="top",
                         wrap_text=True
                     )
 
-            summary_ws.freeze_panes = "A2"
-            summary_ws.auto_filter.ref = summary_ws.dimensions
-
-            # Reasonable column widths.
-            widths = {
-                "EmployeeName": 25,
-                "Total Visits": 14,
-                "Total Flags": 13,
-                "Technical Error": 17,
-                "CM Error": 12,
-                "Remarks": 55,
-            }
-
             for header, width in widths.items():
-                col_num = header_map_session.get(header)
+                col_num = header_map_local.get(header)
                 if col_num:
-                    summary_ws.column_dimensions[
-                        summary_ws.cell(1, col_num).column_letter
+                    combo_ws.column_dimensions[
+                        combo_ws.cell(header_row, col_num).column_letter
                     ].width = width
+
+        format_error_table(
+            fh_title_row,
+            fh_header_row,
+            len(fh_error_summary),
+            "FH Error Summary (before 2:00 PM)",
+        )
+
+        format_error_table(
+            sh_title_row,
+            sh_header_row,
+            len(sh_error_summary),
+            "SH Error Summary (2:00 PM onwards)",
+        )
 
     # Remove helper columns from the downloadable detailed data.
     result = result.drop(
@@ -1330,8 +1378,12 @@ except Exception as exc:
 
 
 # ============================================================
-# DASHBOARD
+# DASHBOARD (KEY METRICS ONLY)
 # ============================================================
+# Detailed breakdowns (Abnormality Summary, Flagged CRM Data,
+# Employee Summary, FH/SH Error Summary) are available in the
+# downloadable Excel report below instead of being repeated
+# on-screen.
 
 total_records = len(result)
 
@@ -1375,127 +1427,6 @@ c4.metric(
     f"{clean_records:,}"
 )
 
-
-# ============================================================
-# ABNORMALITIES SUMMARY
-# ============================================================
-
-st.subheader(
-    "🚨 Abnormalities Summary"
-)
-
-st.dataframe(
-    summary,
-    use_container_width=True,
-    hide_index=True
-)
-
-
-# ============================================================
-# FLAGGED CRM DATA
-# ============================================================
-
-st.subheader(
-    "🚩 Flagged CRM Data"
-)
-
-
-flagged = result[
-    result["Total_Flags"] > 0
-].copy()
-
-
-def highlight_flagged_rows(row):
-
-    if row.get(
-        "Total_Flags",
-        0
-    ) > 0:
-
-        return [
-            "background-color: #FCE4D6"
-        ] * len(row)
-
-    return [
-        ""
-    ] * len(row)
-
-
-if flagged.empty:
-
-    st.success(
-        "No abnormalities found "
-        "for the selected date range."
-    )
-
-else:
-
-    st.caption(
-        f"{len(flagged):,} record(s) "
-        "have abnormalities. "
-        "Highlighted rows contain "
-        "one or more flags."
-    )
-
-    st.dataframe(
-        flagged.style
-        .apply(
-            highlight_flagged_rows,
-            axis=1
-        )
-        .set_properties(
-            **{
-                "vertical-align": "top"
-            }
-        )
-        .format(
-            {
-                "Total_Flags": "{:.0f}"
-            }
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-# ============================================================
-# EMPLOYEE-WISE SUMMARY
-# ============================================================
-
-st.subheader(
-    "👤 Employee-wise Summary"
-)
-
-st.dataframe(
-    employee_summary,
-    use_container_width=True,
-    hide_index=True
-)
-
-
-# ============================================================
-# FH ERROR SUMMARY
-# ============================================================
-
-st.subheader("🌅 FH Error Summary")
-
-st.dataframe(
-    fh_error_summary,
-    use_container_width=True,
-    hide_index=True
-)
-
-# ============================================================
-# SH ERROR SUMMARY
-# ============================================================
-
-st.subheader("🌙 SH Error Summary")
-
-st.dataframe(
-    sh_error_summary,
-    use_container_width=True,
-    hide_index=True
-)
 
 # ============================================================
 # CREATE EXCEL
@@ -1545,11 +1476,13 @@ st.download_button(
 # ============================================================
 
 st.caption(
-    "Flagged records contain Total_Flags "
-    "and Flag_Summary. Quick visits are "
+    "Full breakdown (Abnormality Summary, Flagged CRM Data, "
+    "Employee Summary, FH & SH Error Summary) is in the "
+    "downloadable Excel report. Quick visits are "
     "checked separately for each employee "
     "and each Lead Date. FH is before 2:00 PM and "
     "SH is 2:00 PM onwards. Fake GPS is classified "
     "as Technical Error; all other abnormalities are "
-    "classified as CM Error."
+    "classified as CM Error. FH & SH Error Summary tables "
+    "list only employees who have at least one error."
 )
