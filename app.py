@@ -28,7 +28,6 @@ st.caption(
 
 FAKE_GPS_LAT = 51.673858
 FAKE_GPS_LON = 7.815982
-GPS_DECIMALS = 6
 
 
 # ============================================================
@@ -212,25 +211,33 @@ def analyze_crm(
 
     # --------------------------------------------------------
     # GPS CHECKS
+    #
+    # NOTE: GPS values are compared at FULL PRECISION
+    # (no rounding). Two shops located physically close
+    # to each other will have slightly different raw
+    # lat/lon readings and must NOT be treated as the
+    # same location just because they are nearby.
+    # Only an EXACT match (identical lat AND identical
+    # lon) counts as a duplicate.
     # --------------------------------------------------------
 
     lat = pd.to_numeric(
         df["Latitude"],
         errors="coerce"
-    ).round(GPS_DECIMALS)
+    )
 
     lon = pd.to_numeric(
         df["Longitude"],
         errors="coerce"
-    ).round(GPS_DECIMALS)
+    )
 
-    # Fake GPS
+    # Fake GPS (exact match against known spoofed default)
     fake_gps = (
         lat.eq(FAKE_GPS_LAT)
         & lon.eq(FAKE_GPS_LON)
     )
 
-    # GPS key
+    # GPS key (exact raw values, not rounded)
     gps_key = (
         lat.astype("string")
         + "|"
@@ -371,7 +378,7 @@ def analyze_crm(
 
             flags.append(
                 f"Visit <{quick_minutes} min "
-                "after previous (same emp/date)"
+                "after previous (same emp)"
             )
 
         # ----------------------------------------------------
